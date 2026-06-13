@@ -247,7 +247,7 @@
   <div class="toolbar">
     <button class="btn primary" id="luckyBtn">🎲 手气不错</button>
     <button class="btn" id="favBtn">⭐ 收藏夹 <span id="favCount">0</span></button>
-    <label class="switch" id="aiSwitch" title="开启后『换一批』将调用 Claude API 实时生成">
+    <label class="switch" id="aiSwitch" title="开启后『换一批』将调用 Grok 实时生成">
       <input type="checkbox" id="aiToggle" />
       <span class="track"></span>
       <span>✨ AI 生成模式</span>
@@ -794,44 +794,28 @@ function nextBatchLocal(cat) {
   return chosen;
 }
 
-/* AI 生成（F9）：失败自动降级 */
+// AI 代理端点：默认调用同源的 Vercel 无服务函数 /api/generate，
+// 由服务端持有 xAI(Grok) 的 API Key 并真正调用模型。
+// 若把前端单独托管（如 GitHub Pages），把这里改成你的 Vercel 域名，
+// 例如 "https://你的项目.vercel.app/api/generate"。
+const AI_ENDPOINT = "/api/generate";
+
+/* AI 生成（F9）：调用 Grok 代理，失败自动降级本地题库 */
 async function nextBatchAI(cat) {
-  const apiAvailable = typeof window.claude !== "undefined" &&
-                       typeof window.claude.complete === "function";
-  const prompt = `你是一个"AI 深度提问"设计师。请按以下分类要求，生成 ${PER_BATCH} 条全新的中文提问。
-
-分类名：${cat.name}
-设计要点：${cat.principle}
-已有示例（不要重复，只参考风格）：
-${cat.questions.slice(0, 3).map(q => "- " + q).join("\n")}
-
-要求：
-1. 每条都要新颖，不能是示例的换皮
-2. 口语化，像真人会问的话
-3. 只输出 JSON 数组，格式 ["问题1","问题2",...]，不要任何其他文字、不要 markdown 代码块`;
-
   try {
-    let text;
-    if (apiAvailable) {
-      // Claude Artifact 环境提供的全局补全接口
-      text = await window.claude.complete(prompt);
-    } else {
-      // 自部署环境：直连 Messages API
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const data = await resp.json();
-      text = data.content.filter(b => b.type === "text").map(b => b.text).join("");
-    }
-
-    const parsed = JSON.parse(String(text).replace(/```json|```/g, "").trim());
+    const resp = await fetch(AI_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: cat.name,
+        principle: cat.principle,
+        examples: cat.questions.slice(0, 3),
+        count: PER_BATCH
+      })
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    const parsed = data.questions;
     if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("空结果");
 
     const clean = parsed.map(String).map(s => s.trim()).filter(Boolean).slice(0, PER_BATCH);
@@ -843,10 +827,10 @@ ${cat.questions.slice(0, 3).map(q => "- " + q).join("\n")}
         seenByCat[cat.id].add(q);
       }
     });
-    toast("✨ AI 实时生成了一批新题");
+    toast("✨ Grok 实时生成了一批新题");
     return clean;
   } catch (e) {
-    toast("网络不可用，已切换本地题库");
+    toast("AI 不可用，已切换本地题库");
     return nextBatchLocal(cat);
   }
 }
@@ -1081,9 +1065,9 @@ $("#favBtn").addEventListener("click", showFavorites);
 $("#aiToggle").addEventListener("change", e => {
   aiMode = e.target.checked;
   $("#genHint").textContent = aiMode
-    ? "✨ AI 生成模式已开启：换一批将实时生成（失败自动降级本地题库）"
+    ? "✨ AI 生成模式已开启：换一批将调用 Grok 实时生成（失败自动降级本地题库）"
     : (getCat(activeId).templates ? "本类支持 🎲 即兴：换一批可能掺入模板实时生成的新题" : "");
-  if (aiMode) toast("AI 生成模式已开启");
+  if (aiMode) toast("AI 生成模式已开启（Grok）");
 });
 
 /* =========================================================================

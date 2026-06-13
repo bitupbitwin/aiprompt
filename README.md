@@ -41,7 +41,35 @@
 
 ## 技术说明
 
-- 采用方案 A：单文件 `index.html`，结构 + 样式 + 题库 + 逻辑全在一起，零构建、零依赖。
+- 前端采用方案 A：单文件 `index.html`，结构 + 样式 + 题库 + 逻辑全在一起，零构建、零依赖。
 - 收藏使用内存态（`Map`），未使用 `localStorage`，符合 claude.ai Artifact 环境限制；刷新页面会清空收藏。
-- AI 生成模式优先使用 Artifact 环境注入的 `window.claude.complete`，自部署环境降级为直连 Messages API；任何失败都会 `try/catch` 回退到本地题库并 toast 提示。
+- AI 生成模式调用同源后端代理 `/api/generate`（见下），由服务端持有 API Key 调用 **Grok（xAI）**；任何失败都会 `try/catch` 回退到本地题库并 toast 提示。
 - 尊重系统的"减弱动效"设置（`prefers-reduced-motion`）。
+
+## AI 生成模式（Grok）部署
+
+AI 模式不在浏览器里直连大模型（那样会泄露 API Key、且有 CORS 限制），而是走一个后端代理：浏览器 → `/api/generate`（你的服务端，持有 Key）→ xAI。
+
+本仓库已内置 Vercel 无服务函数 `api/generate.js`，部署步骤：
+
+1. 把仓库导入 Vercel（或 `vercel` CLI 部署）。Vercel 会自动把 `index.html` 当静态站点托管，把 `api/generate.js` 当无服务函数。
+2. 在 Vercel 项目的 **Settings → Environment Variables** 配置：
+   - `XAI_API_KEY`：**必填**，你的 xAI API Key
+   - `XAI_MODEL`：可选，默认 `grok-4`，可改成 `grok-3`、`grok-2-1212` 等
+3. 部署完成后打开站点，开启「✨ AI 生成模式」，点「换一批」即调用 Grok 实时生成。
+
+> 接口为 OpenAI 兼容格式：`POST https://api.x.ai/v1/chat/completions`。
+> 函数已做输入校验、markdown 代码块清洗、JSON 兜底解析，上游报错时返回非 200，前端会自动降级本地题库。
+
+**前后端分开托管时**（例如前端放 GitHub Pages、后端放 Vercel）：把 `index.html` 里的常量 `AI_ENDPOINT` 从 `"/api/generate"` 改成你的 Vercel 函数完整地址，例如 `"https://你的项目.vercel.app/api/generate"`。
+
+### 文件结构
+
+```
+aiprompt/
+├── index.html        # 前端：结构 + 样式 + 题库 + 逻辑（零依赖）
+├── api/
+│   └── generate.js   # Vercel 无服务函数：Grok 代理（持有 API Key）
+├── vercel.json       # Vercel 配置（函数超时等）
+└── README.md
+```
