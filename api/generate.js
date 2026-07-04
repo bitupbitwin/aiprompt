@@ -64,7 +64,8 @@ ${examples.map(q => "- " + q).join("\n")}
       },
       body: JSON.stringify({
         model,
-        max_tokens: 1000,
+        // grok-4 属推理模型，思考 token 计入上限，给足余量避免 JSON 被截断
+        max_tokens: 2000,
         temperature: 1.0,
         messages: [
           { role: "system", content: "你是一个精于设计'能逼出 AI 深度、非常规回答'的中文提问的设计师。只输出 JSON 数组，不要任何多余文字。" },

@@ -668,6 +668,9 @@ const QUESTION_BANK = {
  * ========================================================================= */
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
+// 尊重系统"减弱动效"设置：滚动不使用平滑动画
+const SCROLL_BEHAVIOR = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+
 // Fisher–Yates 洗牌（返回新数组）
 function shuffle(arr) {
   const a = arr.slice();
@@ -760,23 +763,31 @@ async function copyText(text) {
 /* =========================================================================
  *  分类标签渲染
  * ========================================================================= */
+// 标签只创建一次；切换时仅更新选中态，避免重建 DOM 导致滚动位置跳回起点
 function renderTabs() {
   tabsEl.innerHTML = "";
   cats.forEach(c => {
     const b = document.createElement("button");
     b.className = "tab";
     b.setAttribute("role", "tab");
+    b.dataset.catId = c.id;
     b.setAttribute("aria-selected", String(c.id === activeId));
     b.innerHTML = `<span class="em">${c.emoji}</span>${c.name}`;
     b.addEventListener("click", () => {
       if (activeId === c.id) return;
       activeId = c.id;
-      renderTabs();
+      updateTabSelection();
       renderCategoryHeader();
-      drawBatch(true);
-      b.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+      drawBatch(false);
+      b.scrollIntoView({ behavior: SCROLL_BEHAVIOR, inline: "center", block: "nearest" });
     });
     tabsEl.appendChild(b);
+  });
+}
+
+function updateTabSelection() {
+  tabsEl.querySelectorAll(".tab").forEach(b => {
+    b.setAttribute("aria-selected", String(b.dataset.catId === activeId));
   });
 }
 
@@ -787,9 +798,16 @@ function renderCategoryHeader() {
   $("#catCode").textContent = c.code;
   $("#catName").textContent = c.name;
   $("#catTagline").textContent = c.tagline;
-  $("#genHint").textContent = c.templates
-    ? "本类支持 🎲 即兴：换一批可能掺入模板实时生成的新题"
-    : "";
+  updateGenHint();
+}
+
+// 提示文案统一在这里生成：AI 模式优先，其次模板即兴，否则为空
+// （修复：开着 AI 模式切换分类时，提示被错误重置回模板文案）
+function updateGenHint() {
+  const c = getCat(activeId);
+  $("#genHint").textContent = aiMode
+    ? "✨ AI 生成模式已开启：换一批将调用 Grok 实时生成（失败自动降级本地题库）"
+    : (c.templates ? "本类支持 🎲 即兴：换一批可能掺入模板实时生成的新题" : "");
 }
 
 /* =========================================================================
@@ -804,7 +822,9 @@ function nextBatchLocal(cat) {
     // 题库轮完，重置
     if (seen.size > 0) toast("题库已轮完一遍，重新洗牌 🔀");
     seen.clear();
-    unseen = pool.slice();
+    // 重洗时尽量避开刚展示过的一批，防止连续两批出现同一道题
+    unseen = pool.filter(q => !currentBatch.includes(q));
+    if (unseen.length < PER_BATCH) unseen = pool.slice();
   }
 
   const chosen = shuffle(unseen).slice(0, Math.min(PER_BATCH, unseen.length));
@@ -864,12 +884,19 @@ async function nextBatchAI(cat) {
   }
 }
 
-async function drawBatch(reset) {
+let batchSeq = 0; // 请求序号：AI 生成期间若切换了分类/发起新请求，丢弃过期结果
+
+// useAI=true 表示"换一批"触发（AI 模式开启时才真正调用 AI）；
+// 切换分类、初始加载一律走本地题库，避免浏览分类时反复消耗 API
+async function drawBatch(useAI) {
   const cat = getCat(activeId);
-  if (aiMode) {
+  const seq = ++batchSeq;
+  if (useAI && aiMode) {
     setShuffleBusy(true);
-    currentBatch = await nextBatchAI(cat);
+    const batch = await nextBatchAI(cat);
     setShuffleBusy(false);
+    if (seq !== batchSeq) return; // 过期结果：期间已切分类或有更新请求
+    currentBatch = batch;
   } else {
     currentBatch = nextBatchLocal(cat);
   }
@@ -967,6 +994,18 @@ function toggleFav(text, catName) {
 }
 function updateFavCount() { $("#favCount").textContent = favorites.size; }
 
+// 将网格中各卡片的星标与收藏状态对齐（用于收藏夹弹窗里取消收藏后）
+function syncGridFavs() {
+  gridEl.querySelectorAll(".card").forEach(card => {
+    const text = card.querySelector(".q").textContent;
+    const btn = card.querySelector(".act.fav");
+    if (!btn) return;
+    const on = favorites.has(favKey(text));
+    btn.classList.toggle("on", on);
+    btn.innerHTML = on ? "★" : "☆";
+  });
+}
+
 /* =========================================================================
  *  分享（F11）
  * ========================================================================= */
@@ -1003,7 +1042,7 @@ function handleModalAction(action, text, cat) {
   } else if (action === "unfav") {
     favorites.delete(favKey(text));
     updateFavCount();
-    renderGrid();
+    syncGridFavs(); // 只同步星标状态，不整体重渲（避免背后卡片重播动画）
     showFavorites();
   } else if (action === "lucky-again") {
     showLucky();
@@ -1058,7 +1097,7 @@ function showFavorites() {
  * ========================================================================= */
 function showLucky() {
   const c = pick(cats);
-  const text = pick(c.questions);
+  const text = pick(poolByCat[c.id]); // 用完整题池，AI/即兴生成的新题也可能被抽中
   openModal(`
     <button class="help-dot close" data-close aria-label="关闭">✕</button>
     <div class="big">
@@ -1086,16 +1125,14 @@ function escapeAttr(s) { return escapeHtml(s); }
 /* =========================================================================
  *  事件绑定
  * ========================================================================= */
-$("#shuffleBtn").addEventListener("click", () => drawBatch(false));
+$("#shuffleBtn").addEventListener("click", () => drawBatch(true));
 $("#helpBtn").addEventListener("click", showPrinciple);
 $("#luckyBtn").addEventListener("click", showLucky);
 $("#favBtn").addEventListener("click", showFavorites);
 
 $("#aiToggle").addEventListener("change", e => {
   aiMode = e.target.checked;
-  $("#genHint").textContent = aiMode
-    ? "✨ AI 生成模式已开启：换一批将调用 Grok 实时生成（失败自动降级本地题库）"
-    : (getCat(activeId).templates ? "本类支持 🎲 即兴：换一批可能掺入模板实时生成的新题" : "");
+  updateGenHint();
   if (aiMode) toast("AI 生成模式已开启（Grok）");
 });
 
@@ -1119,7 +1156,7 @@ function setupTabsScroll() {
 
   function scrollByStep(dir) {
     const step = Math.max(scroller.clientWidth * 0.7, 160);
-    scroller.scrollBy({ left: dir * step, behavior: "smooth" });
+    scroller.scrollBy({ left: dir * step, behavior: SCROLL_BEHAVIOR });
   }
 
   leftBtn.addEventListener("click", () => scrollByStep(-1));
@@ -1134,6 +1171,8 @@ function setupTabsScroll() {
   });
   scroller.addEventListener("pointermove", e => {
     if (!down) return;
+    // 按键已松开（如在区域外松开后又移回来）：结束拖拽，防止无按键的"幽灵滚动"
+    if (e.pointerType === "mouse" && !(e.buttons & 1)) { endDrag(); return; }
     const dx = e.clientX - startX;
     if (!dragging && Math.abs(dx) > 6) {
       dragging = true; moved = true;
@@ -1154,17 +1193,24 @@ function setupTabsScroll() {
   }
   scroller.addEventListener("pointerup", endDrag);
   scroller.addEventListener("pointercancel", endDrag);
+  // 兜底：在滚动区域外松开鼠标也要结束拖拽状态
+  window.addEventListener("pointerup", endDrag);
   // 拖拽刚结束时屏蔽误触发的 tab 点击
   scroller.addEventListener("click", e => {
     if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; }
   }, true);
 
-  // 竖向滚轮转横向（桌面端方便）
+  // 竖向滚轮转横向（桌面端方便）；已到边缘时放行给页面，避免劫持整页滚动
   scroller.addEventListener("wheel", e => {
-    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      scroller.scrollLeft += e.deltaY;
-      e.preventDefault();
-    }
+    const max = scroller.scrollWidth - scroller.clientWidth;
+    if (max <= 0) return; // 无可滚动内容
+    let delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+    if (e.deltaMode === 1) delta *= 40; // Firefox 行模式换算为像素
+    const atStart = scroller.scrollLeft <= 0 && delta < 0;
+    const atEnd = scroller.scrollLeft >= max - 1 && delta > 0;
+    if (atStart || atEnd) return; // 边缘继续滚：交还页面
+    scroller.scrollLeft += delta;
+    e.preventDefault();
   }, { passive: false });
 
   scroller.addEventListener("scroll", updateEdges, { passive: true });
@@ -1178,7 +1224,7 @@ function setupTabsScroll() {
  * ========================================================================= */
 renderTabs();
 renderCategoryHeader();
-drawBatch(true);
+drawBatch(false);
 updateFavCount();
 const refreshTabEdges = setupTabsScroll();
 // 字体加载完成后宽度可能变化，重算一次
